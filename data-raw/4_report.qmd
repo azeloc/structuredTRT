@@ -1,0 +1,430 @@
+---
+title: "Avaliação de Modelos de Linguagem para Extração Estruturada de Informações em Sentenças Trabalhistas"
+format: html
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+devtools::load_all()
+```
+
+## Metodologia
+
+### Coleta e Preparação dos Dados
+
+O processo de preparação da base de dados iniciou-se com a extração de documentos processuais. Os processos foram listados a partir do Datajud a partir da consulta do TRT1, seguindo de uma amostragem aleatória simples de 533 processos, que foram consultados no sistema Jus.BR (XXX DETALHAR). Os metadados dos processos não foram utilizados nesta análise, apenas os documentos baixados. A coleta dos dados considerou somente os documentos públicos disponíveis no sistema para qualquer cidadão, nas extensões TXT e HTML, que são os formatos mais comuns para os documentos com origem no sistema PJe disponibilizados pelo Jus.BR.
+
+Para identificar as sentenças de interesse, consideramos apenas documentos cujo nome contém o termo "sentença". É importante notar que um processo pode apresentar mais de um documento desse tipo: nesse caso, todos os documentos foram considerados. Arquivos contendo erros de requisição ("Too Many Requests") ou formato PDF foram excluídos. Documentos muito grandes também foram excluídos. Documentos com conteúdo idêntico foram eliminados. No final, obtivemos uma amostra de 640 documentos textuais, que potencialmente são sentenças de mérito de processos trabalhistas.
+
+Um prompt de análise dos documentos foi desenvolvido para extrair informações estruturadas dos documentos. O sistema instrui os modelos a agirem como especialistas em Direito do Trabalho, extraindo as seguintes variáveis:
+
+**Variáveis de escopo:**
+
+-   `escopo` (booleano): Indica se o documento é uma sentença de mérito
+-   `fora_escopo_motivo` (string): Justificativa quando fora do escopo
+
+**Variáveis de decisão (quando `escopo = true`):**
+
+-   `gratuidade_pedida` (categórica: sim/não): Solicitação de gratuidade judiciária pelo autor
+-   `gratuidade_concedida` (categórica: sim/não): Deferimento da gratuidade judiciária
+-   `pedidos` (lista): Array de objetos contendo:
+    -   `categoria`: Classificação do pedido entre 14 categorias predefinidas (reconhecimento de vínculo, horas extras, verbas rescisórias, férias, 13º salário, FGTS, danos morais, danos materiais, adicional de insalubridade, adicional de periculosidade, estabilidade, equiparação salarial, intervalo intrajornada, outros)
+    -   `breve_descricao`: Descrição textual do pedido
+    -   `decisao_pedido`: Resultado (procedente/improcedente)
+-   `julgamento_final` (categórica): Resultado global (procedente/parcialmente_procedente/improcedente)
+-   `valor_condenacao` (numérico): Valor total da condenação em reais
+-   `percentual_sucumbencia` (numérico): Percentual de sucumbência aplicado
+-   `custas` (numérico): Valor das custas processuais
+
+O prompt enfatiza precisão conservadora, instruindo os modelos a retornarem `null` para informações não explicitamente presentes no texto, buscando minimizar extrações inferidas ou especulativas. Foi utilizado o mesmo prompt para todos os modelos avaliados e não foram utilizadas técnicas de otimização automática de prompts (XXX REF)
+
+A etapa de extração utilizou o pacote `ellmer` (XXX REF) para interação com múltiplos provedores de LLMs. Foram avaliados **17 modelos** distribuídos entre 5 provedores:
+
+-   **Anthropic** (2 modelos): `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`
+-   **Google** (2 modelos): `gemini-2.5-flash`, `gemini-2.5-pro`
+-   **Grok, via Open Router** (1 modelo): `x-ai/grok-4.1-fast`
+-   **Groq** (8 modelos): `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`, `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `meta-llama/llama-4-maverick-17b-128e-instruct`, `meta-llama/llama-4-scout-17b-16e-instruct`, `moonshotai/kimi-k2-instruct-0905`, `qwen/qwen3-32b`
+-   **OpenAI** (4 modelos): `gpt-4.1-nano`, `gpt-4.1-mini`, `gpt-4.1`, `gpt-5.1`
+
+
+Uma decisão metodológica importante foi a saída em texto livre. Em testes preliminares, observamos que o uso da técnica de *saídas estruturadas* não era suportada de maneira uniforme por todos os provedores, o que poderia introduzir erros de validação de esquema que não refletiriam a capacidade real dos modelos em seguir instruções. Por isso, optamos por não utilizar APIs de saídas estruturadas em um primeiro momento. Esta abordagem permitiu avaliar a capacidade intrínseca dos modelos de extrair as informações, sem depender de funcionalidades específicas de cada API.
+
+Outra decisão foi sobre a temperatura. No contexto de extração de textos, recomenda-se o uso de temperaturas baixas para reduzir a aleatoriedade das respostas. No entanto, para manter a comparabilidade entre os modelos e refletir as configurações recomendadas pelos desenvolvedores, optoamos por utilizar a temperatura padrão de cada provedor.
+
+Cada documento foi processado por todos os modelos, gerando arquivos JSON individuais para cada documento, totalizando 10.880 extrações (640 documentos × 17 modelos). Essa foi a base bruta para as análises subsequentes.
+
+Considerando que os modelos retornaram texto livre, foi necessário executar uma etapa adicional de estruturação, que converte as respostas em dados tabulares válidos. Esta etapa utilizou o modelo Google Gemini 2.5 Flash, com temperatura zero e *thinking budget* zero (ou seja, o modelo não possui uma etapa de raciocínio). O prompt para essa etapa instrui o modelo a identificar e extrair blocos JSON válidos na saída dos modelos, sem alterar o conteúdo das extrações. O modelo Gemini 2.5 Flash foi escolhido por ser barato[^custo-estruturacao] e apresentar boa performance em tarefas de formatação. Os resultados foram validados a partir da análise por amostragem manual, confirmando a eficácia do processo de estruturação.
+
+[^custo-estruturacao]: O custo total de estruturação dos 10.880 arquivos JSON foi de aproximadamente 4 dólares.
+
+A base final, usada para validação dos resultados, contém 10.880 observações (640 documentos × 17 modelos) com as seguintes variáveis:
+
+-   `path`: Caminho do arquivo JSON original
+-   `provider`: Provedor do modelo (anthropic, google, grok, groq, openai)
+-   `json`: Conteúdo JSON bruto da resposta do modelo
+-   `escopo`: Indicador booleano se o documento está no escopo
+-   `fora_escopo_motivo`: Justificativa quando fora do escopo
+-   `gratuidade_pedida`: Solicitação de gratuidade judiciária
+-   `gratuidade_concedida`: Deferimento de gratuidade judiciária
+-   `julgamento_final`: Resultado global da sentença
+-   `valor_condenacao`: Valor da condenação em reais
+-   `percentual_sucumbencia`: Percentual de sucumbência
+-   `custas`: Valor das custas processuais
+-   `observacao`: Campo para anotações adicionais
+-   `pedidos`: Lista de pedidos estruturados com categoria, descrição e decisão
+
+O desempenho dos modelos foi avaliado em duas dimensões complementares. A primeira é a validade sintática dos JSONs gerados, ou seja, se o modelo conseguiu produzir uma resposta que pode ser parseada corretamente como JSON. A segunda dimensão é a qualidade semântica das extrações, avaliada através da comparação com uma base de referência (*gold standard*), construída por análise manual de XXX decisões.
+
+## Resultados
+
+Com relação à validade sintática, os modelos performaram muito bem. Dos 10.880 testes realizados, apenas 60 (0.5%) geraram uma saída que não pôde ser transformada em um JSON válido usando um método automatizado. A @tbl-provider-distribution mostra a quantidade e proporção de erros apresentada por cada modelo, excluindo os modelos que tiveram 100% dos resultados válidos. Os únicos modelos que apresentaram erros foram os modelos Llama e OpenAI, além de um erro do modelo Claude Haiku. No caso dos modelos LLama, os erros ocorreram quando o modelo retornou respostas em texto livre, sem uma estrutura JSON. No caso do GPT 4.1, os erros ocorreram devido a arquivos JSON com comentários adicionais fora do padrão JSON, o que impediu o processamento automático.
+
+```{r}
+#| label: tbl-json-validity
+#| tbl-cap: "Erros de geração de JSON válido por modelo e provedor"
+#| echo: false
+#| message: false
+#| warning: false
+
+da_report |>
+  dplyr::group_by(provider, model) |>
+  dplyr::summarise(
+    erros = sum(!output_json_valid),
+    prop_erros = formattable::percent(mean(!output_json_valid), 1),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(erros)) |>
+  dplyr::filter(erros > 0) |>
+  knitr::kable()
+```
+
+A @tbl-provider-distribution apresenta a distribuição das 10.880 observações entre os cinco provedores avaliados. O provedor Groq contribuiu com o maior número de modelos (8), seguido por OpenAI (4), Anthropic e Google (2 cada), e Grok (1). Cada modelo foi aplicado aos 640 documentos da base.
+
+### Custos
+
+A @tbl-custos apresenta o custo total e médio por processo para cada provedor e modelo avaliado. Observa-se que os modelos mais avançados da Google, Anthropic e OpenAI apresentaram os maiores custos médios por processo, com mais de um centavo de dólar por processo. Em contrapartida, os modelos com pesos abertos e menos parâmetros apresentaram custos médios significativamente menores. Um caso notável é o modelo Grok 4.1 Fast da xAI, que apresentou um custo médio de apenas 0.0012 dólares por processo, o que o torna uma opção muito econômica para tarefas de extração em larga escala.
+
+```{r}
+#| label: tbl-custos
+#| tbl-cap: "Custo total e médio por processo para cada provedor e modelo"
+
+da_report |>
+  dplyr::group_by(provider, model) |>
+  dplyr::summarise(
+    total_cost = sum(cost),
+    avg_cost = mean(cost),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(total_cost)) |>
+  knitr::kable(digits = 4)
+
+```
+
+### Comparação com base de referência manual
+
+Com base em uma amostra de XXX sentenças trabalhistas, foi construída uma base de referência manual contendo as extrações corretas para cada variável. Essa base serviu como *gold standard* para avaliar a qualidade semântica das extrações geradas pelos modelos. A @tbl-accuracy-metrics apresenta as principais métricas de acurácia para cada modelo, considerando as variáveis extraídas.
+
+XXX AINDA PRECISA FAZER A VALIDAÇÃO MANUAL E PREENCHER ESSA TABELA
+
+### Comparação com base de referência Google Gemini 2.5 Pro
+
+A partir da análise manual, evidenciou-se que o modelo Google Gemini 2.5 Pro apresentou a melhor performance geral na extração das variáveis de interesse. Por isso, optou-se por utilizar as extrações desse modelo como uma base de referência alternativa para comparar os demais modelos. A vantagem dessa abordagem é permitir uma avaliação automatizada, considerando a performance relativa entre os modelos, sem depender exclusivamente da base manual, que pode ser limitada em tamanho.
+
+```{r}
+#| label: bases-auxiliares
+#| echo: false
+#| message: false
+
+gabarito <- da_report |>
+  dplyr::filter(model == "gemini-2.5-pro") |>
+  dplyr::transmute(
+    id_processo = basename(path),
+    escopo,
+    gratuidade_pedida,
+    gratuidade_concedida,
+    julgamento_final,
+    valor_condenacao,
+    percentual_sucumbencia,
+    custas
+  )
+
+# escopo -----------------
+
+aux_acuracia_escopo <- da_report |>
+  dplyr::mutate(id_processo = basename(path)) |>
+  dplyr::select(provider, model, id_processo, escopo, cost) |>
+  dplyr::inner_join(
+    dplyr::select(gabarito, id_processo, escopo),
+    by = c("id_processo" = "id_processo"),
+    suffix = c("_pred", "_true")
+  ) |>
+  dplyr::group_by(provider, model) |>
+  dplyr::summarise(
+    n_escopo_pred = sum(escopo_pred),
+    accuracy = mean(escopo_pred == escopo_true),
+    fpr = mean(escopo_pred[!escopo_true] == TRUE),
+    fnr = mean(!escopo_pred[escopo_true] == TRUE),
+    bal_accuracy = 0.5 * (1 - fpr + 1 - fnr),
+    precision = mean(escopo_pred[escopo_true] == TRUE),
+    recall = mean(escopo_true[escopo_pred] == TRUE),
+    f1 = 2 * (precision * recall) / (precision + recall),
+    avg_cost = mean(cost),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(accuracy)) |>
+  dplyr::select(provider, model, n_escopo_pred, accuracy, avg_cost)
+
+# variaveis -----------------
+
+dados_processo_com_gabarito <- da_report |>
+  dplyr::transmute(
+    provider,
+    model,
+    id_processo = basename(path),
+    cost,
+    escopo,
+    gratuidade_pedida,
+    gratuidade_concedida,
+    julgamento_final,
+    valor_condenacao,
+    percentual_sucumbencia,
+    custas
+  ) |>
+  dplyr::inner_join(gabarito, by = "id_processo", suffix = c("_pred", "_true"))
+
+analise_por_variavel <- dados_processo_com_gabarito |>
+  dplyr::filter(escopo_true) |>
+  dplyr::mutate(dplyr::across(escopo_pred:custas_true, as.character)) |>
+  tidyr::pivot_longer(escopo_pred:custas_true) |>
+  tidyr::separate(name, c("variavel", "tipo"), sep = "_(?=[^_]+$)") |>
+  tidyr::pivot_wider(names_from = tipo, values_from = value) |>
+  tidyr::replace_na(list(pred = "<vazio>", true = "<vazio>")) |>
+  dplyr::mutate(acertou = pred == true) |>
+  dplyr::filter(variavel != "escopo") |>
+  dplyr::group_by(provider, model, variavel) |>
+  dplyr::summarise(
+    prop_acerto = mean(acertou),
+    avg_cost = mean(cost),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(prop_acerto)) |>
+  tidyr::pivot_wider(names_from = variavel, values_from = c(prop_acerto)) |>
+  dplyr::mutate(
+    media = rowMeans(
+      dplyr::pick(gratuidade_concedida:valor_condenacao),
+      na.rm = TRUE
+    )
+  ) |>
+  dplyr::arrange(dplyr::desc(media))
+
+
+# pedidos --------------
+
+da_pedidos <- da_report |>
+  tidyr::unnest(pedidos)
+
+gabarito_pedido <- da_pedidos |>
+  dplyr::filter(escopo, model == "google_gemini-2.5-pro") |>
+  dplyr::transmute(
+    id_processo = basename(path),
+    categoria,
+    breve_descricao,
+    decisao_pedido
+  ) |>
+  dplyr::distinct(id_processo, categoria, .keep_all = TRUE)
+
+dados_pedidos_com_gabarito <- da_pedidos |>
+  dplyr::transmute(
+    provider,
+    model,
+    id_processo = basename(path),
+    cost,
+    categoria,
+    breve_descricao,
+    decisao_pedido
+  ) |>
+  dplyr::distinct(model, categoria, id_processo, .keep_all = TRUE) |>
+  dplyr::full_join(
+    gabarito_pedido,
+    by = c("id_processo", "categoria"),
+    suffix = c("_pred", "_true")
+  ) |>
+  dplyr::mutate(dplyr::across(where(is.factor), as.character)) |>
+  dplyr::select(-dplyr::starts_with("breve_descricao")) |>
+  tidyr::replace_na(
+    list(
+      decisao_pedido_pred = "<vazio>",
+      decisao_pedido_true = "<vazio>"
+    )
+  )
+
+aux_acuracia_pedido <- dados_pedidos_com_gabarito |>
+  dplyr::group_by(provider, model) |>
+  dplyr::summarise(
+    n = sum(decisao_pedido_true != "<vazio>"),
+    recall = mean(decisao_pedido_pred != "<vazio>"),
+    precision = mean(decisao_pedido_true != "<vazio>"),
+    acuracia = mean(decisao_pedido_pred == decisao_pedido_true),
+    avg_cost = mean(cost[!duplicated(id_processo)]),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(acuracia))
+
+```
+
+#### Escopo
+
+A primeira análise compara a acurácia dos modelos na identificação do escopo dos documentos, ou seja, se o modelo consegue corretamente classificar um documento como sentença de mérito ou não. A @p-acuracia-escopo apresenta a relação entre a acurácia na identificação de escopo e o custo médio por processo para cada modelo avaliado. Foi utilizada a escala logarítmica no eixo da acurácia para melhor visualização dos resultados, já que vários modelos apresentaram acurácia próxima de 100%. Pelo gráfico, os melhores modelos quando comparados com o Gemini 2.5 Pro foram o GPT-5.1 da OpenAI, o Claude Sonnet 4.5 da Anthropic, o Gemini 2.5 Flash da Google, e o Grok 4.1 Fast da xAI. Com relação custo-benefício, o modelo da xAI apresentou o melhor desempenho, com alta acurácia e baixo custo por processo. Já o modelo Llama 3.1 8b apresentou o pior desempenho, com acurácia de apenas 63%.
+
+```{r}
+#| label: p-acuracia-escopo
+#| fig-cap: "Acurácia na identificação de escopo vs custo por processo"
+p_acuracia_escopo <- aux_acuracia_escopo |>
+  ggplot2::ggplot(ggplot2::aes(
+    y = accuracy,
+    x = avg_cost,
+    colour = provider
+  )) +
+  ggplot2::geom_hline(yintercept = 1, linetype = "dashed", color = "gray") +
+  ggplot2::geom_point(size = 2) +
+  ggrepel::geom_text_repel(
+    ggplot2::aes(label = model),
+    max.overlaps = 5
+  ) +
+  ggplot2::scale_x_log10(
+    labels = scales::dollar_format(accuracy = 0.001)
+  ) +
+  ggplot2::scale_y_log10(labels = scales::percent, breaks = seq(0.6, 1, .05)) +
+  ggplot2::scale_colour_manual(
+    values = c(
+      "Google" = "#4285F4",
+      "Openai" = "#333333",
+      "Anthropic" = "#FF9900",
+      "xAI" = "#009900",
+      "Groq" = "#dd4422"
+    )
+  ) +
+  ggplot2::labs(
+    title = "Acurácia na identificação de escopo vs custo por processo",
+    y = "Acurácia na identificação de escopo",
+    x = "Custo médio por processo (USD)",
+    colour = "Fornecedor"
+  ) +
+  ggplot2::theme_minimal()
+
+p_acuracia_escopo
+```
+
+#### Variáveis
+
+A @tbl-acuracia-variaveis apresenta a acurácia detalhada por variável extraída e modelo, excluindo o modelo Gemini 2.5 Pro, que foi usado como base de referência, e considerando apenas os casos em que o documento foi classificado como estando no escopo segundo o modelo Gemini 2.5 Pro. Cada célula da tabela mostra a acurácia na extração da variável correspondente para o modelo indicado na linha. A última coluna mostra a média geral de acurácia por modelo, calculada como a média simples das acurácias individuais para cada variável extraída. Observa-se que o modelo Gemini 2.5 Flash da Google apresenta a melhor acurácia em quase todas as variáveis, seguido pelo GPT-4.1-mini da OpenAI e pelo Llama 3.3 70b da Groq. As variáveis com maior acurácia geral são `gratuidade_pedida` e `gratuidade_concedida`, enquanto as variáveis `valor_condenacao` e `percentual_sucumbencia` apresentam as menores acurácias, indicando maior dificuldade dos modelos em extrair informações numéricas complexas.
+
+```{r}
+#| label: tbl-acuracia-variaveis
+#| tbl-cap: "Acurácia por variável extraída e modelo"
+analise_por_variavel |>
+  dplyr::filter(model != "gemini-2.5-pro") |>
+  dplyr::select(-avg_cost) |>
+  knitr::kable()
+```
+
+Com relação às variáveis extraídas, a @p-variavel apresenta a acurácia média por variável extraída em função do custo médio por processo. A acurácia média é calculada como a média simples das acurácias individuais para cada variável extraída (exceto `escopo`). Observa-se que os modelos com melhor desempenho geral são o Gemini 2.5 Flash, seguido pelo GPT-4.1-mini da OpenAI e pelo Llama 3.3 70b. Com relação ao custo benefício, não há um modelo que se destaque significativamente, dependendo de um valor de corte específico para a acurácia mínima aceitável.
+
+```{r}
+#| label: p-variavel
+#| fig-cap: "Acurácia média por variável extraída vs custo por processo"
+
+analise_por_variavel |>
+  dplyr::mutate(custo_beneficio = media / avg_cost) |>
+  dplyr::arrange(dplyr::desc(custo_beneficio)) |>
+  dplyr::filter(media > .9)
+
+p_variavel <- analise_por_variavel |>
+  dplyr::mutate(model = forcats::fct_reorder(model, media)) |>
+  dplyr::select(provider, model, media, avg_cost) |>
+  ggplot2::ggplot(ggplot2::aes(
+    y = media,
+    x = avg_cost,
+    colour = provider
+  )) +
+  ggplot2::geom_hline(yintercept = 1, linetype = "dashed", color = "gray") +
+  ggplot2::geom_point(size = 2) +
+  ggrepel::geom_text_repel(
+    ggplot2::aes(label = model),
+    max.overlaps = 5
+  ) +
+  ggplot2::scale_x_log10(
+    labels = scales::dollar_format(accuracy = 0.001)
+  ) +
+  ggplot2::scale_y_log10(labels = scales::percent, breaks = seq(0.6, 1, 0.05)) +
+  ggplot2::scale_colour_manual(
+    values = c(
+      "Google" = "#4285F4",
+      "Openai" = "#333333",
+      "Anthropic" = "#FF9900",
+      "xAI" = "#009900",
+      "Groq" = "#dd4422"
+    )
+  ) +
+  ggplot2::labs(
+    title = "Acurácia média por variável extraída vs custo por processo",
+    y = "Acurácia média por variável extraída",
+    x = "Custo médio por processo (USD)",
+    colour = "Fornecedor"
+  ) +
+  ggplot2::theme_minimal()
+
+p_variavel
+
+```
+
+#### Pedidos
+
+Para estimar a qualidade das extrações dos pedidos, utilizou-se a estratégia a seguir. Considerando os pedidos extraídos pelo modelo Gemini 2.5 Pro como base de referência, avaliou-se a capacidade dos demais modelos em identificar corretamente a presença de pedidos (independentemente da categoria ou decisão). Nesse caso, a acurácia mede a capacidade do modelo em identificar se um pedido está presente ou não, comparando com o gabarito. A @p-acuracia-pedido apresenta a relação entre a acurácia na extração de pedidos e o custo médio por processo para cada modelo avaliado. Observa-se que o modelo Grok 4.1 Fast da xAI apresentou a melhor acurácia, seguido pelo LLama 4 Maverick 17b. Com relação ao custo-benefício, o modelo Grok 4.1 Fast também se destaca, apresentando alta precisão com baixo custo por processo.
+
+```{r}
+#| label: p-acuracia-pedido
+#| fig-cap: "Acurácia na extração de pedidos vs custo por processo"
+p_acuracia_pedido <- aux_acuracia_pedido |>
+  ggplot2::ggplot(ggplot2::aes(
+    y = acuracia,
+    x = avg_cost,
+    colour = provider
+  )) +
+  ggplot2::geom_hline(yintercept = 1, linetype = "dashed", color = "gray") +
+  ggplot2::geom_point(size = 2) +
+  ggrepel::geom_text_repel(
+    ggplot2::aes(label = model),
+    max.overlaps = 5
+  ) +
+  ggplot2::scale_x_log10(
+    labels = scales::dollar_format(accuracy = 0.001)
+  ) +
+  ggplot2::scale_y_log10(labels = scales::percent, breaks = seq(.5, 1, .1)) +
+  ggplot2::scale_colour_manual(
+    values = c(
+      "Google" = "#4285F4",
+      "Openai" = "#333333",
+      "Anthropic" = "#FF9900",
+      "xAI" = "#009900",
+      "Groq" = "#dd4422"
+    )
+  ) +
+  ggplot2::labs(
+    title = "Acurácia na extração de pedidos vs custo por processo",
+    y = "Acurácia na extração de pedidos",
+    x = "Custo médio por processo (USD)",
+    colour = "Fornecedor"
+  ) +
+  ggplot2::theme_minimal()
+
+p_acuracia_pedido
+
+```
+
+## Referências
+
+

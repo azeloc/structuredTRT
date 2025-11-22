@@ -1,0 +1,10 @@
+.Rproj.user
+data-raw/cpopg
+data-raw/runs
+data-raw/*.rds
+.Rhistory
+.RData
+.httr-oauth
+.DS_Store
+.quarto
+.Renviron
