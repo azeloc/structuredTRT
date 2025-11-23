@@ -425,6 +425,8 @@ p_acuracia_pedido
 
 ```
 
+### Conclusões
+
+A presente análise avaliou o desempenho de 17 modelos de linguagem para a extração estruturada de informações em sentenças trabalhistas. Os resultados indicam que os modelos mais avançados, como o Google Gemini 2.5 Flash e o OpenAI GPT-4.1-mini, apresentaram as melhores performances gerais em termos de acurácia na extração das variáveis de interesse. Além disso, o modelo Grok 4.1 Fast da xAI demonstraram um bom equilíbrio entre custo e desempenho, tornando-se uma opção viável para aplicações em larga escala. Os modelos com pesos abertos, também mostraram resultados promissores, embora com maior variabilidade na acurácia.
+
 ## Referências
-
-
